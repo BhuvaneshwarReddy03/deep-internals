@@ -1,4 +1,4 @@
-What is a BlockingQueue? How is it used in Producer-Consumer problems?
+## What is a BlockingQueue? How is it used in Producer-Consumer problems?
 A standard `Queue` fails in producer-consumer systems because it is **passive**:
 
 * If you call `poll()` on an empty `LinkedList` or `ArrayDeque`, it returns `null` immediately.
@@ -56,3 +56,43 @@ When `put()` adds an item, it calls `notEmpty.signal()`. When `take()` removes a
 * **`ArrayBlockingQueue`**: Bounded buffer backed by an array.
 * **`LinkedBlockingQueue`**: Optionally bounded, backed by linked nodes (uses two separate locks for put and take, offering higher concurrency).
 * **`SynchronousQueue`**: Zero-capacity queue where each `put()` must wait for a corresponding `take()` (heavily used in `Executors.newCachedThreadPool()`).
+
+## Difference between ArrayBlockingQueue and LinkedBlockingQueue?
+
+The core architectural difference comes down to **locking strategy** and **backing data structure**.
+
+---
+
+### Key Differences
+
+| Feature | `ArrayBlockingQueue` | `LinkedBlockingQueue` |
+| --- | --- | --- |
+| **Backing Structure** | Backed by a **circular array** (`Object[]`). | Backed by a **singly linked list** of `Node` objects. |
+| **Locking Mechanism** | **Single lock** shared by both producers and consumers. | **Two separate locks**: `putLock` for producers, `takeLock` for consumers. |
+| **Concurrency / Throughput** | Lower concurrency under high load (producers block consumers and vice versa). | **Higher concurrency** (producers and consumers can operate simultaneously). |
+| **Capacity** | **Strictly bounded**; must specify capacity at creation time. | **Optionally bounded**; defaults to `Integer.MAX_VALUE` if not specified. |
+| **Memory & GC Footprint** | **Zero object allocation** on inserts (pre-allocated array); very GC-friendly. | **Allocates a `Node` object** on every `put()`, creating more garbage collection overhead. |
+
+---
+
+### The Two Critical Architectural Details
+
+#### 1. The Locking Architecture (Interview Favorite)
+
+* In **`ArrayBlockingQueue`**, there is only **one `ReentrantLock**`. If a producer is executing `put()`, a consumer cannot execute `take()` at the exact same microsecond.
+* In **`LinkedBlockingQueue`**, the head and tail are decoupled via two locks:
+```java
+private final ReentrantLock takeLock = new ReentrantLock();
+private final ReentrantLock putLock = new ReentrantLock();
+
+```
+
+
+A consumer taking from the head does not block a producer appending to the tail, enabling higher throughput under heavy thread contention.
+
+#### 2. The Unbounded Trap
+
+If you initialize `new LinkedBlockingQueue<>()` without passing a capacity argument, its capacity defaults to `Integer.MAX_VALUE` (~2.14 billion items).
+If producers produce faster than consumers, the queue will grow indefinitely until the application crashes with an `OutOfMemoryError`. It is almost always best practice in production to supply an explicit capacity.
+
+---
