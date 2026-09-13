@@ -36,15 +36,6 @@ Because iterators hold onto a reference to the array snapshot taken at the momen
 
 ---
 
-### How to Say It in Your Own Words
-
-> "`CopyOnWriteArrayList` is a thread-safe implementation of `List`.
-> * **How it works:** Any write operation (`add`, `remove`, `set`) creates a brand-new cloned copy of the entire underlying array under a lock, while read operations and iterators access the snapshot without any locking.
-> * **Why no exception:** Iterators loop over the fixed snapshot, making them fail-safe and immune to `ConcurrentModificationException`.
-> * **When to use:** In **read-heavy, write-rare** multi-threaded scenarios—like storing event listeners or notification subscribers. We avoid it when writes are frequent because copying the array on every write is expensive ($O(n)$)."
-> 
-> 
-
 ## We already have synchronized list, right? Why do we need this separately?
 `Collections.synchronizedList()` has two fatal flaws in high-concurrency environments:
 
