@@ -419,3 +419,523 @@ Every single collection in Java defines its own dedicated, private inner class t
 ### Key Takeaway for Interviews
 
 > Each Java collection defines its own specialized, internal `Node` or `Entry` class. `LinkedList` has its own `Node`, `HashMap` has its own `Node` and `TreeNode`, and `TreeMap` has its own `Entry`. They are not shared.
+
+
+## What is a ConcurrentHashMap? How does it differ from Hashtable and Collections.synchronizedMap()?
+
+| Feature | `Hashtable` (Legacy Java 1.0) | `Collections.synchronizedMap` (Java 2) | `ConcurrentHashMap` (Java 5 / 8+) |
+| --- | --- | --- | --- |
+| **Thread Safety** | **Yes** | **Yes** | **Yes** |
+| **Locking Mechanism** | Method-level `synchronized` on the entire object. | Wraps map methods in `synchronized(mutex)` on the entire object. | **Fine-grained:** CAS (Compare-And-Swap) + `synchronized` on individual bucket heads (Java 8). |
+| **Read Operations** | **Blocking:** Reads block reads and writes. | **Blocking:** Reads block reads and writes. | **Lock-free / Non-blocking:** Reads never block. |
+| **Null Keys / Values** | Neither allowed (throws NPE). | Allowed (if backing map supports it). | **Neither allowed** (throws NPE to avoid ambiguity in concurrency). |
+| **Performance** | Very poor under contention. | Very poor under contention. | **Extremely high throughput.** |
+
+---
+
+### How `ConcurrentHashMap` Works Internally
+
+Interviewers frequently ask about Java 7 vs. Java 8 implementation:
+
+* **Java 7 (Segment Locking):** Divided the map into an array of 16 segments. Each segment was like an independent `ReentrantLock` map. Threads locked only one segment at a time.
+* **Java 8+ (Bucket-level Locking with CAS):**
+* Eliminated segments.
+* If a bucket is empty, it inserts the node using a **lock-free CAS (Compare-And-Swap)** operation.
+* If a bucket has collisions, it locks **only the head node of that specific bucket** using `synchronized(node)`.
+* Other buckets remain completely open for simultaneous writes.
+* Reads (`get()`) use `volatile` node references, making reads completely **lock-free**.
+
+## Explain the internal working of ConcurrentHashMap (Java 7 Segment locking vs Java 8 CAS & Node locking).
+
+The evolution from Java 7 to Java 8 fundamentally reshaped `ConcurrentHashMap` by shifting from **coarse lock striping (segments)** to **ultra-fine-grained, bucket-level locking paired with hardware-level CAS (Compare-And-Swap)**.
+
+---
+
+### Java 7: Segment Locking (Lock Striping)
+
+In Java 7, `ConcurrentHashMap` did not lock the entire map, but it didn't lock individual buckets either. It used an intermediate approach called **Segment Locking**:
+
+* **Internal Structure:** The map was backed by an array of **`Segment<K,V>[]`** (default size of 16, known as `concurrencyLevel`).
+* **What is a Segment?** Each `Segment` was an explicit subclass of **`ReentrantLock`** that internally maintained its own independent table of hash buckets (`HashEntry<K,V>[]`).
+* **Two-Step Hashing:**
+1. It hashed the key once to find which **Segment** the key belonged to.
+2. It hashed the key a second time to find the exact bucket within that segment's internal table.
+
+
+* **The Concurrency Bottleneck:** Up to **16 threads** could write concurrently by default. However, if two keys hashed to different buckets within the **same segment**, they contended for the exact same `ReentrantLock`.
+
+---
+
+### Java 8: CAS + Synchronized Node Locking
+
+Java 8 completely removed the `Segment` class and flattened the structure back to a single array of buckets (`Node<K,V>[]`), just like standard `HashMap`. Concurrency is handled dynamically at the individual bucket level:
+
+**1. Lock-Free Insertion via CAS (Empty Bucket)**
+When a thread attempts to write to an empty bucket index:
+
+* It does **not acquire any lock**.
+* Instead, it uses low-level hardware atomic instructions via `Unsafe.compareAndSwapObject()` (or `VarHandle` in newer JVMs).
+* It checks: *"Is this bucket slot still `null`? If yes, atomically point it to the new `Node`."*
+* If another thread won the race, CAS fails safely, and the thread loops back to retry.
+
+**2. Fine-Grained Node Locking (Collisions)**
+If the bucket is already occupied:
+
+* The thread locks **only the head node** of that specific bucket using intrinsic `synchronized(f)`:
+```java
+synchronized (firstNode) {
+    // Traverse the linked list or Red-Black Tree
+    // Update value or append new node
+}
+
+```
+
+
+* Because only the first node of that bucket is locked, threads targeting different buckets execute concurrently without blocking each other.
+
+**3. Lock-Free Reads (`get()`)**
+
+* The `val` and `next` pointers inside `Node<K,V>` are declared **`volatile`**.
+* Reads require zero synchronization and never block writes or other reads.
+
+**4. Treeification**
+
+* Just like Java 8 `HashMap`, if collisions in a single bucket reach **8 nodes** (and total table capacity is $\ge 64$), the bucket converts to a **TreeBin** (Red-Black Tree), ensuring $O(\log n)$ worst-case access under lock.
+
+---
+
+### Core Comparison
+
+| Dimension | Java 7 | Java 8 |
+| --- | --- | --- |
+| **Underlying Structure** | Array of `Segment`s (each wrapping an array of `HashEntry`). | Single flat array of `Node<K,V>[]` (plus `TreeNode`s). |
+| **Locking Mechanism** | Explicit `ReentrantLock` per segment. | **CAS** for empty buckets + **`synchronized`** on bucket head node. |
+| **Max Concurrent Writers** | Fixed by segment count (default **16**). | Equal to the **number of buckets** (scales dynamically as table resizes). |
+| **Memory Footprint** | High overhead (allocating `Segment` objects and nested tables). | Low overhead (flat array, no intermediate segment wrappers). |
+| **Worst-Case Collisions** | Singly linked lists ($O(n)$ lookup). | Red-Black Trees ($O(\log n)$ lookup). |
+
+---
+## What is a TreeMap? When would you use it over a HashMap?
+---
+
+### Key Technical Differences
+
+| Feature | `HashMap` | `TreeMap` |
+| --- | --- | --- |
+| **Backing Structure** | Array of buckets (Linked List / Red-Black Tree in Java 8) | Self-balancing **Red-Black Tree** |
+| **Ordering** | **No ordering** guarantees whatsoever. | **Sorted** according to natural ordering (`Comparable`) or a custom `Comparator`. |
+| **Time Complexity** | **$O(1)$** average for `get()`, `put()`, `remove()`. | **$O(\log n)$** guaranteed for all basic operations (`get()`, `put()`, `remove()`). |
+| **Interface Implemented** | `Map` | `Map`, `SortedMap`, **`NavigableMap`** |
+| **Null Keys** | Allows **one `null` key**. | **Does NOT allow `null` keys** (throws `NullPointerException` because it must compare keys). Allows `null` values. |
+| **Equality Check** | Uses `.hashCode()` and `.equals()`. | Uses **`compareTo()`** or `compare()` (does not call `equals()` for lookup!). |
+
+---
+
+### When to Use `TreeMap` Over `HashMap`
+
+1. **Range Queries & Submaps:** When you need to retrieve a slice of the map:
+* `subMap(fromKey, toKey)`: get entries between two boundaries.
+* `headMap(toKey)` / `tailMap(fromKey)`: get everything before or after a point.
+
+
+2. **Closest-Match Lookups (`NavigableMap` APIs):**
+* `floorKey(k)`: greatest key $\le k$
+* `ceilingKey(k)`: lowest key $\ge k$
+* `higherKey(k)` / `lowerKey(k)`: strictly $>$ or $<$
+
+
+3. **Sorted Iteration:** When an application requires keys processed in strict ascending or descending alphabetical/numerical sequence without external sorting.
+
+> **When NOT to use it:** If you don't need sorting, never use `TreeMap`. `HashMap` is substantially faster ($O(1)$ vs $O(\log n)$) and consumes less memory per node.
+
+---
+
+## Can we use null as a key in HashMap? What about ConcurrentHashMap? Why?
+
+In `HashMap`, **yes**, you can have exactly **one `null` key** (and multiple `null` values). In `ConcurrentHashMap`, **neither `null` keys nor `null` values are allowed**—attempting to insert either throws a `NullPointerException`.
+
+---
+
+### How `HashMap` Supports `null` Keys
+
+Normally, `HashMap` calls `key.hashCode()` to locate a bucket. If the key is `null`, calling `.hashCode()` would cause a `NullPointerException`.
+
+Java explicitly handles this inside its hashing logic:
+
+```java
+static final int hash(Object key) {
+    int h;
+    return (key == null) ? 0 : (h = key.hashCode()) ^ (h >>> 16);
+}
+
+```
+
+* A `null` key is assigned a hash code of **`0`**.
+* It always resides in bucket index **`0`**.
+* If you insert another pair with a `null` key, it simply overwrites the previous value at index `0`.
+
+---
+
+### Why `ConcurrentHashMap` Rejects `null` (The Exact Reason)
+
+Doug Lea (the author of `java.util.concurrent`) designed this intentionally to prevent **silent race conditions and multi-threaded ambiguity**.
+
+There are two primary problems with `null` in a concurrent collection:
+
+#### 1. Ambiguity in `map.get(key)`
+
+In a non-concurrent `HashMap`, if `map.get(key)` returns `null`, there are two possibilities:
+
+1. The key is **not present** in the map.
+2. The key **is present**, but its value is explicitly mapped to `null`.
+
+In single-threaded `HashMap`, you disambiguate this with a second call:
+
+```java
+if (map.get(key) == null) {
+    if (map.containsKey(key)) {
+        // Key exists, value is null!
+    } else {
+        // Key doesn't exist!
+    }
+}
+
+```
+
+#### 2. The Multi-Threaded Race Condition (Why it breaks in `ConcurrentHashMap`)
+
+In a multi-threaded program, that two-step check is **fundamentally broken**:
+
+```java
+// Thread A checks the key:
+if (map.get(key) == null) {
+    // ---> Thread B suddenly removes the key, or puts a new value here!
+    if (map.containsKey(key)) { 
+        // LIES! The state changed between line 1 and line 3!
+    }
+}
+
+```
+
+Because the map can be modified concurrently between `get()` and `containsKey()`, the result of `containsKey()` is unreliable.
+
+By banning `null` values, `ConcurrentHashMap` guarantees:
+
+> **If `map.get(key) == null`, the key simply does not exist. Period.** There is zero ambiguity.
+
+---
+
+### Why Ban `null` Keys Specifically?
+
+1. **Simplicity and Predictability:** Methods like `computeIfAbsent()`, `merge()`, and atomic check-then-act operations rely on `null` meaning "entry is absent." If a key could be `null`, you would have to track whether a `null` argument represents a missing key or the actual literal `null` key.
+2. **Cost of Edge Cases:** Handling `null` keys would require branches across complex lock-free CAS loops and tree bin traversals solely to support an antipattern.
+
+As Doug Lea famously stated:
+
+> *"The main reason that `null`s aren't allowed in `ConcurrentMaps` is that ambiguities that may be just barely tolerable in non-concurrent maps can't be accommodated."*
+
+---
+
+## What happens if two threads try to modify a HashMap simultaneously?
+
+The short answer is: **You get silent data corruption, lost updates, or infinite loops—NOT a `ConcurrentModificationException` (CME).**
+
+A very common misconception is that `ConcurrentModificationException` is thrown when two threads write to a `HashMap` at the same time. It is not.
+
+---
+
+### Why You Don't (Usually) Get `ConcurrentModificationException`
+
+`ConcurrentModificationException` is only thrown by an **`Iterator`**.
+
+Inside `HashMap`, there is an internal counter called `modCount` (incremented on every structural change like `put()` or `remove()`). When you create an iterator, it copies this value into `expectedModCount`.
+
+* CME only happens if **Thread A is actively iterating** (e.g., in a `for-each` loop) while **Thread B modifies the map**:
+```java
+for (String key : map.keySet()) { // Iterator checks modCount == expectedModCount
+    // If another thread calls map.put() here -> CME is thrown
+}
+
+```
+
+
+* If **Thread A calls `map.put()**` and **Thread B calls `map.put()**` simultaneously, **neither is using an iterator**. Neither checks `modCount`. Therefore, **no exception is thrown**. The operation fails silently, corrupting internal state.
+
+---
+
+### What Actually Happens: 4 Catastrophic Failures
+
+When two threads concurrently call `put()` or `remove()` on a raw `HashMap`, one of four things occurs:
+
+#### 1. Silent Data Loss (Lost Updates)
+
+Imagine two threads try to insert into the same empty bucket index at the same moment:
+
+1. **Thread 1** sees the bucket is `null`.
+2. **Thread 2** also sees the bucket is `null`.
+3. Thread 1 creates `Node A` and places it at index 3.
+4. Thread 2 creates `Node B` and places it at index 3, overwriting Thread 1's write.
+
+* **Result:** `Node A` is permanently lost from the map, but `map.size()` might still increment twice, desynchronizing the size counter from the actual stored elements.
+
+#### 2. Corrupted Size Counter
+
+The internal variable `size` is an ordinary `int`, not atomic (`volatile` or `AtomicInteger`):
+
+```java
+size++; // This is THREE operations: read, increment, write
+
+```
+
+If two threads increment `size` at the same time, a classic race condition occurs. Even if both keys are stored, `size` might only increment by 1. Methods like `map.size()` and threshold recalculations will now report wrong numbers.
+
+#### 3. Corrupted Linked List Pointers
+
+When two threads insert into an existing bucket chain simultaneously:
+
+* Both threads read the current tail node.
+* Thread 1 points `tail.next` to its new node.
+* Thread 2 simultaneously points `tail.next` to *its* new node.
+* One of the nodes is orphaned, or worse, internal pointer links break, causing subsequent `get()` calls to fail or skip elements.
+
+#### 4. 100% CPU Lockup / Infinite Loop (Java 7 Specific)
+
+This is a famous interview question:
+
+* In **Java 7**, `HashMap` used **head insertion** during resizing (`transfer()`).
+* If two threads resized the map at the same time, the reversal of linked list pointers caused two nodes to point to each other in a circular loop: `A -> B -> A`.
+* The next time any thread called `map.get()` on that bucket, it entered an infinite `while` loop traversing `A` and `B`, pinning the CPU core at **100% utilization**.
+* *(Note: Java 8 fixed this specific bug by switching to tail insertion, but concurrent modification in Java 8 still causes tree corruption and lost updates).*
+
+---
+
+### Summary Comparison
+
+| Scenario | What Happens? |
+| --- | --- |
+| **Thread 1 writes (`put`) + Thread 2 writes (`put`)** | **Silent Data Corruption:** Lost nodes, corrupted `size`, broken node pointers. **No exception thrown.** |
+| **Thread 1 iterates (`for-each`) + Thread 2 writes (`put`)** | **`ConcurrentModificationException`** is thrown (fail-fast iterator detects `modCount != expectedModCount`). |
+
+---
+
+## Why are HashMap keys typically immutable?
+
+The fundamental reason keys must be immutable is: **if a key’s fields change after insertion, its `hashCode()` changes, permanently "losing" the entry inside the map.**
+
+---
+
+### What Actually Happens When a Key Mutates
+
+`HashMap` finds an entry in two steps:
+
+1. Call `key.hashCode()` and mask it to find the **bucket index**.
+2. Search that bucket's chain/tree using `key.equals(node.key)`.
+
+If the key object is mutable and you change its state after putting it into the map:
+
+```java
+Employee emp = new Employee("Alice", 101); // say hashCode produces bucket index 3
+map.put(emp, "HR Department");
+
+// Now we mutate the key:
+emp.setName("Bob"); // emp's hashCode recalculates, now pointing to bucket index 9!
+
+// Try retrieving the value:
+map.get(emp); // Returns NULL!
+
+```
+
+**Why does `get()` return `null`?**
+
+* When you call `map.get(emp)`, `HashMap` computes the **new** hash code of `emp`.
+* The new hash code points to **bucket 9**.
+* But the entry was originally stored in **bucket 3**.
+* `HashMap` looks in bucket 9, finds nothing (or completely different keys), and returns `null`.
+* The original entry is still sitting in bucket 3, unreachable. This causes **silent memory leaks**.
+
+---
+
+### The Three Core Problems Caused by Mutable Keys
+
+1. **Lost Data (Unretrievable Entries):**
+As shown above, `map.get(key)` checks the wrong bucket and returns `null`.
+2. **Broken Memory / Leaks:**
+You can't even remove the entry with `map.remove(key)` because `remove()` looks in the new bucket, leaving the old entry stranded in memory forever.
+3. **Broken Map Invariant (Duplicate Keys):**
+If you insert the modified key again with a new value:
+```java
+map.put(emp, "Engineering");
+
+```
+
+
+It inserts into bucket 9. Now you have the exact same object existing twice in two different buckets, destroying the core `Map` contract of unique keys.
+
+---
+
+### Why `String` and Boxed Primitives are the Best Keys
+
+Types like `String`, `Integer`, `UUID`, and `Long` are ideal keys because:
+
+* They are **strictly immutable** (`final` classes with `final` fields).
+* Their `hashCode()` is calculated once and will never change for the lifetime of the JVM.
+* `String` even caches its `hash` in a private field, so subsequent `hashCode()` calls take $O(1)$ time with zero recalculation.
+
+---
+
+## Okay, but why changing a value in the object affects the hash code? What's the thing behind it? I don't understand. So are we going to have But we are in your thing, you are modifying the, not modifying the, like you are modifying the field of object, but you are saying, I don't understand that part. Now how are you linking object with the hash code? Object fields with the hash code. Object fields with the hash code.
+
+This is the exact "aha!" moment for Java developers.
+
+The link between an **object's fields** and its **hash code** exists because of how you write (or how IDEs/Lombok generate) the **`hashCode()` method** of your custom class.
+
+---
+
+### How an Object Generates its Hash Code
+
+In Java, every class inherits `hashCode()` from `Object`.
+
+* By default, `Object.hashCode()` produces an identity-based hash (roughly derived from memory address).
+* **However**, whenever you use a custom class in collections, you **must override `equals()` and `hashCode()**` according to the Java contract.
+
+Look at how a standard custom class is written:
+
+```java
+public class Employee {
+    private String name;
+    private int id;
+
+    public Employee(String name, int id) {
+        this.name = name;
+        this.id = id;
+    }
+
+    // Standard equals & hashCode generated by IDE / Objects.hash()
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof Employee)) return false;
+        Employee emp = (Employee) o;
+        return id == emp.id && Objects.equals(name, emp.name);
+    }
+
+    @Override
+    public int hashCode() {
+        // Look closely at this line:
+        return Objects.hash(name, id); 
+    }
+
+    public void setName(String name) { this.name = name; }
+}
+
+```
+
+Notice what `Objects.hash(name, id)` does:
+It takes the values of the fields (`name` and `id`) and combines their math:
+
+
+$$\text{hash} = 31 \times \text{name.hashCode}() + \text{id}$$
+
+---
+
+### Connecting the Dots: Field Change $\to$ Hash Code Change $\to$ Lost Object
+
+Let's walk through what happens step-by-step with real numbers:
+
+#### Step 1: You create the object and insert it
+
+```java
+Employee emp = new Employee("Alice", 101);
+
+```
+
+1. `emp.hashCode()` calculates the hash using `"Alice"` and `101`.
+* Suppose `Objects.hash("Alice", 101)` returns **`54321`**.
+
+
+2. You run `map.put(emp, "HR Department")`:
+* `HashMap` calculates index: `54321 & (16 - 1) = 54321 & 15 =` **Bucket 3**.
+* It stores `emp` inside **Bucket 3**.
+
+
+
+---
+
+#### Step 2: You mutate the field
+
+```java
+emp.setName("Bob"); // Field changed!
+
+```
+
+The object in memory is the exact same object, but its internal field `name` is now `"Bob"`.
+
+---
+
+#### Step 3: You try to retrieve it
+
+```java
+map.get(emp);
+
+```
+
+What does `map.get(emp)` do under the hood?
+
+1. It calls `emp.hashCode()`.
+2. Inside `emp.hashCode()`, it runs:
+```java
+Objects.hash(this.name, this.id)
+
+```
+
+
+3. But `this.name` is now **`"Bob"`**, NOT `"Alice"`!
+* `"Bob".hashCode()` is completely different from `"Alice".hashCode()`.
+* `Objects.hash("Bob", 101)` now evaluates to **`98765`**!
+
+
+4. `HashMap` calculates the bucket index for `98765`:
+* `98765 & 15 =` **Bucket 9**.
+
+
+5. `HashMap` walks over to **Bucket 9** and looks for your employee.
+* Bucket 9 is completely empty! (or has completely different people).
+* It returns **`null`**.
+
+
+
+Your employee object is still physically sitting inside **Bucket 3**, but the map is looking inside **Bucket 9** because the hash code formula used the modified field.
+
+---
+
+### What If You Don't Override `hashCode()`?
+
+If you don't override `hashCode()`, it uses `Object.hashCode()`, which doesn't change when fields change.
+
+**BUT** if you don't override `hashCode()` and `equals()`, two distinct objects with the exact same data (`new Employee("Alice", 101)`) will have different hashes and won't match anyway, which breaks the `equals()` contract.
+
+---
+## What is rehashing? When does it happen?
+
+**1. The Trigger Formula**
+Rehashing triggers when:
+
+
+$$\text{map.size}() > \text{capacity} \times \text{loadFactor}$$
+
+
+For default settings: $16 \times 0.75 = \mathbf{12}$. On the 13th unique key insert, `resize()` is invoked.
+
+**2. Cost of Resizing**
+
+* Array allocation: A new array of double capacity ($2 \times n$) is allocated on the heap.
+* Time complexity: **$O(n)$** because every existing node must be inspected and moved.
+
+**3. Java 8 Optimization (The Bit Trick)**
+In Java 7, resizing recalculates `indexFor(hash, newCapacity)` for every entry.
+In Java 8+, it does not recompute or do modulo. Because capacity doubles (adding a single high bit to the mask), an entry only has two possible landing spots:
+
+* **`hash & oldCap == 0`**: stays at **`oldIndex`**
+* **`hash & oldCap != 0`**: moves to **`oldIndex + oldCap`**
+
+---
